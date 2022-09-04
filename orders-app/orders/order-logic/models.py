@@ -1,24 +1,6 @@
-from django.contrib.auth.base_user import BaseUserManager
-from django.contrib.auth.models import AbstractUser
-from django.contrib.auth.validators import UnicodeUsernameValidator
+from django.contrib.auth.base_user import BaseUserManager, AbstractBaseUser
+from django.contrib.auth.models import PermissionsMixin
 from django.db import models
-from django.utils.translation import gettext_lazy as _
-from django_rest_passwordreset.tokens import get_token_generator
-
-# состояния
-STATE_CHOICES = (
-    ('basket', 'Статус корзины'),
-    ('new', 'Новый'),
-    ('confirmed', 'Подтвержден'),
-    ('assembled', 'Собран'),
-    ('sent', 'Отправлен'),
-    ('delivered', 'Доставлен'),
-    ('canceled', 'Отменен'),
-)
-USER_TYPE_CHOICES = (
-    ('shop', 'Магазин'),
-    ('buyer', 'Покупатель'),
-)
 
 
 # Классы для создания пользователей
@@ -59,43 +41,84 @@ class UserManager(BaseUserManager):
         return self._create_user(email, password, **extra_fields)
 
 
-class User(AbstractUser):
-    """
-    Стандартная модель пользователей
-    """
-    REQUIRED_FIELDS = []
-    objects = UserManager()
-    USERNAME_FIELD = 'email'
-    email = models.EmailField(_('email address'), unique=True)
-    company = models.CharField(verbose_name='Компания', max_length=40, blank=True)
-    position = models.CharField(verbose_name='Должность', max_length=40, blank=True)
-    username_validator = UnicodeUsernameValidator()
-    username = models.CharField(
-        _('username'),
-        max_length=150,
-        help_text=_('Обязательно к заполнению. 150 символов или меньше. Только буквы, цифры и @/./+/-/_.'),
-        validators=[username_validator],
-        error_messages={
-            'unique': _("Пользователь с таким именем уже существует."),
-        },
+class User(AbstractBaseUser, PermissionsMixin):
+    # статусы пользователя
+    SUPPLIER = 'supplier'
+    BUYER = 'buyer'
+    STAFF = 'staff'
+    USER_KIND = (
+        (SUPPLIER, 'Поставщик'),
+        (BUYER, 'Покупатель'),
+        (STAFF, 'Сотрудник'),
+    )
+
+    full_name = models.CharField(
+        max_length=100,
+    )
+    email = models.EmailField(
+        unique=True,
+    )
+    password = models.CharField(
+        max_length=100,
+    )
+    company = models.CharField(
+        max_length=100,
+    )
+    position = models.CharField(
+        max_length=100,
+    )
+    kind = models.CharField(
+        max_length=10,
+        choices=USER_KIND,
+        blank=False,
     )
     is_active = models.BooleanField(
-        _('active'),
-        default=False,
-        help_text=_(
-            'Указывает, следует ли считать этого пользователя активным. '
-            'Отмените выбор вместо удаления учетных записей.'
-        ),
+        default=True,
     )
-    type = models.CharField(verbose_name='Тип пользователя', choices=USER_TYPE_CHOICES, max_length=5, default='buyer')
+
+    USERNAME_FIELD = EMAIL_FIELD = 'email'
+    REQUIRED_FIELDS = ['full_name', 'company', 'position', 'kind']
+
+    objects = UserManager()
 
     def __str__(self):
-        return f'{self.first_name} {self.last_name}'
+        return f'{self.full_name}'
+
+    @property
+    def is_supplier(self):
+        return self.kind == self.SUPPLIER
+
+    @property
+    def is_buyer(self):
+        return self.kind == self.BUYER
+
+    @property
+    def is_staff(self):
+        if self.kind == self.STAFF or self.is_superuser:
+            return True
+        else:
+            return False
 
     class Meta:
-        verbose_name = 'Пользователь'
-        verbose_name_plural = "Список пользователей"
-        ordering = ('email',)
+        db_table = 'users'
+
+
+# 9.
+# Contact
+# - type
+# - user
+# - value
+class Contact(models.Model):
+    phone = models.CharField(max_length=22)
+    address = models.CharField(max_length=120)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='contacts_user'
+    )
+
+    class Meta:
+        db_table = 'contacts_user'
 
 
 # 1.
@@ -105,7 +128,7 @@ class User(AbstractUser):
 # - filename
 class Shop(models.Model):
     name = models.CharField(max_length=60, verbose_name='Название магазина')
-    url = models.URLField(verbose_name='Ccылка', null=True, blank=True)cd
+    url = models.URLField(verbose_name='Ccылка', null=True, blank=True)
     manager = models.OneToOneField(
         User,
         verbose_name='Менеджер',
@@ -201,9 +224,17 @@ class ProductInfo(models.Model):
 # 5.
 # Parameter
 # - name
-class Parameter():
-    pass
+class Parameter(models.Model):
+    name = models.CharField(
+        max_length=120,
+        unique=True
+    )
 
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        db_table = 'parameters'
 
 
 # 6.
@@ -211,8 +242,24 @@ class Parameter():
 # - product_info
 # - parameter
 # - value
-class ProductParameter():
-    pass
+class ProductParameter(models.Model):
+    value = models.CharField(max_length=120)
+    parameter = models.ForeignKey(
+        Parameter,
+        on_delete=models.CASCADE,
+        related_name='product_parameters'
+    )
+    product_info = models.ForeignKey(
+        ProductInfo,
+        on_delete=models.CASCADE,
+        related_name='parameters'
+    )
+
+    def __str__(self):
+        return self.value
+
+    class Meta:
+        db_table = 'product_parameters'
 
 
 # 7.
@@ -220,8 +267,42 @@ class ProductParameter():
 # - user
 # - dt
 # - status
-class Order():
-    pass
+class Order(models.Model):
+    # состояния заказа
+    NEW = 'new'
+    PROCESSING = 'processing'
+    SHIPPED = 'shipped'
+    DELIVERED = 'delivered'
+    CANCELLED = 'cancelled'
+    STATUS_CHOICES = (
+        (NEW, 'Заявка принята'),
+        (PROCESSING, 'Заказ обрабатывается'),
+        (SHIPPED, 'Заказ отправлен'),
+        (DELIVERED, 'Заказ доставлен'),
+        (CANCELLED, 'Заказ отменен')
+    )
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='orders'
+    )
+    dt = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(
+        choices=STATUS_CHOICES,
+        default=NEW
+    )
+    contact = models.ForeignKey(
+        Contact,
+        on_delete=models.CASCADE,
+        related_name='order_contact'
+    )
+
+    def __str__(self):
+        return self.id
+
+    class Meta:
+        db_table = 'orders'
 
 
 # 8.
@@ -230,14 +311,21 @@ class Order():
 # - product
 # - shop
 # - quantity
-class OrderItem():
-    pass
+class OrderItem(models.Model):
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='order_items'
+    )
+    product = models.ForeignKey(
+        ProductInfo,
+        on_delete=models.CASCADE,
+        related_name='product_item'
+    )
+    quantity = models.PositiveIntegerField()
 
+    def __str__(self):
+        return f'{self.product} {self.quantity}'
 
-# 9.
-# Contact
-# - type
-# - user
-# - value
-class Contact():
-    pass
+    class Meta:
+        db_table = 'order_items'
