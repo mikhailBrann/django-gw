@@ -1,27 +1,40 @@
-from django.contrib.auth.base_user import BaseUserManager, AbstractBaseUser
-from django.contrib.auth.models import PermissionsMixin
+from django.contrib.auth.base_user import BaseUserManager
+from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.db import models
+from django_rest_passwordreset.tokens import get_token_generator
+
+STATE_CHOICES = (
+    ('basket', 'Статус корзины'),
+    ('new', 'Новый'),
+    ('confirmed', 'Подтвержден'),
+    ('assembled', 'Собран'),
+    ('sent', 'Отправлен'),
+    ('delivered', 'Доставлен'),
+    ('canceled', 'Отменен'),
+)
+
+USER_TYPE_CHOICES = (
+    ('shop', 'Магазин'),
+    ('buyer', 'Покупатель'),
+
+)
 
 
 # Классы для создания пользователей
 class UserManager(BaseUserManager):
     """
-    Миксин управления пользователями
+    Миксин для управления пользователями
     """
     use_in_migrations = True
 
     def _create_user(self, email, password, **extra_fields):
-        """
-        Mетод создает пользователя с именем, email и паролем
-        """
         if not email:
-            raise ValueError('нужно указать email')
-
+            raise ValueError('The given email must be set')
         email = self.normalize_email(email)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
-
         return user
 
     def create_user(self, email, password=None, **extra_fields):
@@ -34,73 +47,63 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault('is_superuser', True)
 
         if extra_fields.get('is_staff') is not True:
-            raise ValueError('Суперпользователь должен иметь is_staff=True.')
+            raise ValueError('У суперпользователя значение is_staff равно True.')
         if extra_fields.get('is_superuser') is not True:
-            raise ValueError('Суперпользователь должен иметь is_superuser=True.')
+            raise ValueError('У суперпользователя значение is_superuser равно True.')
 
         return self._create_user(email, password, **extra_fields)
 
 
-class User(AbstractBaseUser, PermissionsMixin):
-    # статусы пользователя
-    SUPPLIER = 'supplier'
-    BUYER = 'buyer'
-    STAFF = 'staff'
-    USER_KIND = (
-        (SUPPLIER, 'Поставщик'),
-        (BUYER, 'Покупатель'),
-        (STAFF, 'Сотрудник'),
-    )
-
-    full_name = models.CharField(
-        max_length=100,
-    )
+class User(AbstractUser):
+    """
+    Стандартная модель пользователей
+    """
+    REQUIRED_FIELDS = []
+    objects = UserManager()
+    USERNAME_FIELD = 'email'
     email = models.EmailField(
-        unique=True,
-    )
-    password = models.CharField(
-        max_length=100,
+        'email address',
+        unique=True
     )
     company = models.CharField(
-        max_length=100,
+        verbose_name='Компания',
+        max_length=40,
+        blank=True
     )
     position = models.CharField(
-        max_length=100,
+        verbose_name='Должность',
+        max_length=40,
+        blank=True
     )
-    kind = models.CharField(
-        max_length=10,
-        choices=USER_KIND,
-        blank=False,
+    username_validator = UnicodeUsernameValidator()
+    username = models.CharField(
+        'username',
+        max_length=150,
+        help_text='150 <= символов. Только буквы, цифры и @/./+/-/_',
+        validators=[username_validator],
+        error_messages={
+            'уникальность': "Пользователь с таким именем уже существует"
+        },
     )
     is_active = models.BooleanField(
-        default=True,
+        'active',
+        default=False,
+        help_text='Показывает, активен ли пользователь.'
+    )
+    type = models.CharField(
+        verbose_name='Тип пользователя',
+        choices=USER_TYPE_CHOICES,
+        max_length=5,
+        default='buyer'
     )
 
-    USERNAME_FIELD = EMAIL_FIELD = 'email'
-    REQUIRED_FIELDS = ['full_name', 'company', 'position', 'kind']
-
-    objects = UserManager()
-
     def __str__(self):
-        return f'{self.full_name}'
-
-    @property
-    def is_supplier(self):
-        return self.kind == self.SUPPLIER
-
-    @property
-    def is_buyer(self):
-        return self.kind == self.BUYER
-
-    @property
-    def is_staff(self):
-        if self.kind == self.STAFF or self.is_superuser:
-            return True
-        else:
-            return False
+        return f'{self.first_name} {self.last_name}'
 
     class Meta:
-        db_table = 'users'
+        verbose_name = 'Пользователь'
+        verbose_name_plural = "Список пользователей"
+        ordering = ('email',)
 
 
 # 9.
@@ -143,7 +146,7 @@ class Shop(models.Model):
         return self.name
 
     class Meta:
-        db_name = 'shops'
+        db_table = 'shops'
 
 
 # 2.
@@ -177,7 +180,7 @@ class Product(models.Model):
         return self.name
 
     class Meta:
-        dbtable = 'products'
+        db_table = 'products'
 
 
 # 4.
@@ -207,11 +210,10 @@ class ProductInfo(models.Model):
 
     def __str__(self):
         return self.product.name
-    pass
 
     class Meta:
         db_table = 'product_info'
-        constants = [models.UniqueConstraint(
+        constraints = [models.UniqueConstraint(
             fields=(
                 'product',
                 'shop',
@@ -289,6 +291,7 @@ class Order(models.Model):
     )
     dt = models.DateTimeField(auto_now_add=True)
     status = models.CharField(
+        max_length=40,
         choices=STATUS_CHOICES,
         default=NEW
     )
@@ -329,3 +332,41 @@ class OrderItem(models.Model):
 
     class Meta:
         db_table = 'order_items'
+
+
+class ConfirmEmailToken(models.Model):
+    class Meta:
+        verbose_name = 'Токен подтверждения Email'
+        verbose_name_plural = 'Токены подтверждения Email'
+
+    @staticmethod
+    def generate_key():
+        return get_token_generator().generate_token()
+
+    user = models.ForeignKey(
+        User,
+        related_name='confirm_email_tokens',
+        on_delete=models.CASCADE,
+        verbose_name="Пользователь, связанный с токеном сброса пароля"
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Дата генерации токен"
+    )
+
+    # Key field, though it is not the primary key of the model
+    key = models.CharField(
+        "Key",
+        max_length=64,
+        db_index=True,
+        unique=True
+    )
+
+    def save(self, *args, **kwargs):
+        if not self.key:
+            self.key = self.generate_key()
+        return super(ConfirmEmailToken, self).save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Токен сброса пароля для пользователя {self.user}"
